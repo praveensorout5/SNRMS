@@ -11,7 +11,7 @@ const COLUMNS = [
   { key: 'pdf', label: 'Signed Nominal Rolls (PDF)', type: 'pdf', width: 200 },
 ]
 
-export default function Spreadsheet({ session, profile, activeSheet, view, currentMonth, canEdit, isAdmin, showToast }) {
+export default function Spreadsheet({ session, profile, activeSheet, view, currentMonth, canEditCells, canEditPdf, isAdmin, showToast }) {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedMonth, setSelectedMonth] = useState('')
@@ -19,7 +19,20 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
   const [editingCell, setEditingCell] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [uploadingFor, setUploadingFor] = useState(null)
+  const [monthLocked, setMonthLocked] = useState(false)
+  const [showInsertAt, setShowInsertAt] = useState(null)
   const fileInputRef = useRef(null)
+
+  const fetchMonthLock = useCallback(async (sheet, month) => {
+    if (!sheet || !month) { setMonthLocked(false); return }
+    const { data } = await supabase
+      .from('month_locks')
+      .select('is_locked')
+      .eq('sheet_type', sheet)
+      .eq('month_year', month)
+      .maybeSingle()
+    setMonthLocked(data?.is_locked === true)
+  }, [])
 
   const fetchRows = useCallback(async (monthYear) => {
     setLoading(true)
@@ -58,6 +71,11 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     fetchRows(view === 'previous' ? selectedMonth : null)
   }, [activeSheet, view, currentMonth, selectedMonth])
 
+  useEffect(() => {
+    const monthToCheck = view === 'previous' ? selectedMonth : currentMonth
+    fetchMonthLock(activeSheet, monthToCheck)
+  }, [activeSheet, view, currentMonth, selectedMonth, fetchMonthLock])
+
   const handleAddRow = async () => {
     const nextSNo = rows.length > 0 ? Math.max(...rows.map(r => r.s_no || 0)) + 1 : 1
     const { data, error } = await supabase
@@ -84,6 +102,48 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     }
   }
 
+  const handleInsertRowAt = async (afterIndex) => {
+    const insertSNo = rows[afterIndex]?.s_no || 0
+    const nextSNo = insertSNo + 1
+    // Shift all rows after this index down by 1 in s_no
+    const rowsToUpdate = rows.filter((r, i) => i > afterIndex)
+    for (const r of rowsToUpdate) {
+      await supabase
+        .from('nominal_rolls')
+        .update({ s_no: (r.s_no || 0) + 1 })
+        .eq('id', r.id)
+    }
+    const { data, error } = await supabase
+      .from('nominal_rolls')
+      .insert({
+        sheet_type: activeSheet,
+        s_no: nextSNo,
+        sewa_from_date: null,
+        sewa_to_date: null,
+        department: '',
+        center: '',
+        no_of_sewadars: 0,
+        month_year: currentMonth,
+        created_by: session.user.id,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      showToast('Failed to insert row: ' + error.message, 'error')
+    } else {
+      const newRows = [...rows]
+      newRows.splice(afterIndex + 1, 0, data)
+      // Update s_no for shifted rows in local state
+      for (let i = afterIndex + 2; i < newRows.length; i++) {
+        newRows[i] = { ...newRows[i], s_no: (newRows[i].s_no || 0) + 1 }
+      }
+      setRows(newRows)
+      showToast('Row inserted', 'success')
+    }
+    setShowInsertAt(null)
+  }
+
   const handleDeleteRow = async (rowId) => {
     if (!confirm('Delete this row? This cannot be undone.')) return
     const { error } = await supabase
@@ -99,8 +159,58 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     }
   }
 
+  const handleLockMonth = async () => {
+    const monthToLock = view === 'previous' ? selectedMonth : currentMonth
+    if (!monthToLock) return
+    if (!confirm(`Lock ${activeSheet === 'bhati' ? 'Bhati' : 'Beas'} for ${new Date(monthToLock + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}? No further edits will be allowed.`)) return
+
+    const { data: existing } = await supabase
+      .from('month_locks')
+      .select('id')
+      .eq('sheet_type', activeSheet)
+      .eq('month_year', monthToLock)
+      .maybeSingle()
+
+    if (existing) {
+      const { error } = await supabase
+        .from('month_locks')
+        .update({ is_locked: true, locked_by: session.user.id, locked_at: new Date().toISOString() })
+        .eq('id', existing.id)
+      if (error) { showToast('Failed to lock month', 'error'); return }
+    } else {
+      const { error } = await supabase
+        .from('month_locks')
+        .insert({ sheet_type: activeSheet, month_year: monthToLock, is_locked: true, locked_by: session.user.id, locked_at: new Date().toISOString() })
+      if (error) { showToast('Failed to lock month', 'error'); return }
+    }
+    setMonthLocked(true)
+    showToast('Month locked successfully', 'success')
+  }
+
+  const handleUnlockMonth = async () => {
+    const monthToUnlock = view === 'previous' ? selectedMonth : currentMonth
+    if (!monthToUnlock) return
+    const { data: existing } = await supabase
+      .from('month_locks')
+      .select('id')
+      .eq('sheet_type', activeSheet)
+      .eq('month_year', monthToUnlock)
+      .maybeSingle()
+
+    if (existing) {
+      const { error } = await supabase
+        .from('month_locks')
+        .update({ is_locked: false, locked_by: null, locked_at: null })
+        .eq('id', existing.id)
+      if (error) { showToast('Failed to unlock month', 'error'); return }
+    }
+    setMonthLocked(false)
+    showToast('Month unlocked', 'success')
+  }
+
   const startEdit = (row, colKey) => {
-    if (!canEdit) return
+    if (!canEditCells) return
+    if (monthLocked && !isAdmin) return
     setEditingCell({ rowId: row.id, colKey })
     setEditValue(row[colKey] ?? '')
   }
@@ -131,9 +241,13 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
       showToast('Only PDF files are allowed', 'error')
       return
     }
+    if (monthLocked && !isAdmin) {
+      showToast('This month is locked. Upload is not allowed.', 'error')
+      return
+    }
 
     setUploadingFor(rowId)
-    const filePath = `${activeSheet}/${currentMonth}/${rowId}/${Date.now()}-${file.name}`
+    const filePath = `${activeSheet}/${view === 'previous' ? selectedMonth : currentMonth}/${rowId}/${Date.now()}-${file.name}`
 
     try {
       const { error: uploadError } = await supabase.storage
@@ -158,13 +272,34 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     }
   }
 
-  const getPdfUrl = (pdfPath) => {
+  const getPdfUrl = async (pdfPath) => {
     if (!pdfPath) return null
-    const { data } = supabase.storage
+    const { data, error } = await supabase.storage
       .from('nominal-rolls-pdfs')
-      .getPublicUrl(pdfPath)
-    return data?.publicUrl
+      .createSignedUrl(pdfPath, 3600)
+    if (error) return null
+    return data?.signedUrl
   }
+
+  const [pdfUrls, setPdfUrls] = useState({})
+
+  useEffect(() => {
+    const loadPdfUrls = async () => {
+      const urls = {}
+      for (const row of rows) {
+        if (row.pdf_path) {
+          const url = await getPdfUrl(row.pdf_path)
+          if (url) urls[row.id] = url
+        }
+      }
+      setPdfUrls(urls)
+    }
+    if (rows.length > 0) {
+      loadPdfUrls()
+    } else {
+      setPdfUrls({})
+    }
+  }, [rows])
 
   const handleDeletePdf = async (rowId, pdfPath) => {
     if (!confirm('Remove this PDF?')) return
@@ -204,7 +339,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     const csvLines = [headers.join(',')]
 
     rows.forEach(row => {
-      const pdfUrl = getPdfUrl(row.pdf_path)
+      const pdfUrl = pdfUrls[row.id] || ''
       const values = [
         row.s_no ?? '',
         formatDate(row.sewa_from_date),
@@ -247,7 +382,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     html += '</tr>'
 
     rows.forEach(row => {
-      const pdfUrl = getPdfUrl(row.pdf_path)
+      const pdfUrl = pdfUrls[row.id] || ''
       html += '<tr>'
       html += `<td>${row.s_no ?? ''}</td>`
       html += `<td>${formatDate(row.sewa_from_date)}</td>`
@@ -279,7 +414,8 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
 
   const renderCell = (row, col) => {
     if (col.type === 'pdf') {
-      const url = getPdfUrl(row.pdf_path)
+      const url = pdfUrls[row.id]
+      const canUploadPdf = canEditPdf && (!monthLocked || isAdmin)
       return (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {url ? (
@@ -308,7 +444,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
                 </svg>
                 {row.pdf_name || 'View PDF'}
               </a>
-              {canEdit && (
+              {canUploadPdf && (
                 <button
                   onClick={() => handleDeletePdf(row.id, row.pdf_path)}
                   className="btn-sm btn-ghost"
@@ -322,7 +458,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
                 </button>
               )}
             </>
-          ) : canEdit ? (
+          ) : canUploadPdf ? (
             <label
               style={{
                 display: 'inline-flex',
@@ -402,7 +538,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
       <span
         onClick={() => startEdit(row, col.key)}
         style={{
-          cursor: canEdit ? 'pointer' : 'default',
+          cursor: canEditCells && (!monthLocked || isAdmin) ? 'pointer' : 'default',
           display: 'block',
           padding: '2px 4px',
           borderRadius: 4,
@@ -411,10 +547,16 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
           minHeight: 20,
         }}
       >
-        {formatted || (canEdit ? '—' : '')}
+        {formatted || (canEditCells && (!monthLocked || isAdmin) ? '—' : '')}
       </span>
     )
   }
+
+  const isCurrentView = view === 'current'
+  const canAddRow = isCurrentView && canEditCells && (!monthLocked || isAdmin)
+  const monthLabel = view === 'previous' && selectedMonth
+    ? new Date(selectedMonth + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    : new Date(currentMonth + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
 
   return (
     <div style={{ padding: '0 24px 24px' }}>
@@ -449,6 +591,33 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
         </div>
       )}
 
+      {/* Month lock banner */}
+      {monthLocked && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '10px 16px',
+          background: 'var(--warning-50)',
+          border: '1px solid var(--warning-200)',
+          borderRadius: 8,
+          marginBottom: 12,
+          fontSize: 13,
+          color: 'var(--warning-700)',
+        }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <span><strong>{monthLabel}</strong> is locked. Editing and uploads are disabled{isAdmin ? ' (you can still edit as admin)' : ''}.</span>
+          {isAdmin && (
+            <button onClick={handleUnlockMonth} className="btn-sm" style={{ marginLeft: 'auto', background: 'white', color: 'var(--warning-700)', border: '1px solid var(--warning-200)' }}>
+              Unlock Month
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Toolbar */}
       <div style={{
         display: 'flex',
@@ -459,13 +628,31 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
         gap: 8,
       }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {view === 'current' && canEdit && (
+          {canAddRow && (
             <button onClick={handleAddRow} className="btn-primary btn-sm">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
               Add Row
+            </button>
+          )}
+          {isAdmin && isCurrentView && !monthLocked && (
+            <button onClick={handleLockMonth} className="btn-secondary btn-sm" style={{ color: 'var(--warning-700)' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              Lock Month
+            </button>
+          )}
+          {isAdmin && view === 'previous' && !monthLocked && (
+            <button onClick={handleLockMonth} className="btn-secondary btn-sm" style={{ color: 'var(--warning-700)' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              Lock Month
             </button>
           )}
         </div>
@@ -492,7 +679,8 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
           )}
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {rows.length} record{rows.length !== 1 ? 's' : ''} • {activeSheet === 'bhati' ? 'Bhati' : 'Beas'} Sheet
-            {view === 'current' && !canEdit && ' • Read-only'}
+            {isCurrentView && !canEditCells && ' • Read-only'}
+            {!isCurrentView && ' • Read-only'}
           </span>
         </div>
       </div>
@@ -521,7 +709,7 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
             <p style={{ fontSize: 13 }}>
               {view === 'previous'
                 ? 'No previous month records available.'
-                : canEdit
+                : canAddRow
                   ? 'Click "Add Row" to create the first entry.'
                   : 'No entries have been added for this month yet.'}
             </p>
@@ -551,8 +739,8 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
                       {col.label}
                     </th>
                   ))}
-                  {isAdmin && view === 'current' && (
-                    <th style={{ width: 50, padding: '10px 12px', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)' }}></th>
+                  {canAddRow && (
+                    <th style={{ width: 80, padding: '10px 12px', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', fontSize: 12, color: 'var(--neutral-600)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Actions</th>
                   )}
                 </tr>
               </thead>
@@ -578,8 +766,8 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
                         {renderCell(row, col)}
                       </td>
                     ))}
-                    {isAdmin && view === 'current' && (
-                      <td style={{ padding: '8px 12px' }}>
+                    {canAddRow && (
+                      <td style={{ padding: '8px 12px', display: 'flex', gap: 4, alignItems: 'center' }}>
                         <button
                           onClick={() => handleDeleteRow(row.id)}
                           className="btn-sm btn-ghost"
@@ -589,6 +777,17 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="3 6 5 6 21 6" />
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => handleInsertRowAt(idx)}
+                          className="btn-sm btn-ghost"
+                          style={{ padding: '4px 6px', color: 'var(--primary-500)' }}
+                          title="Insert row below"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
                           </svg>
                         </button>
                       </td>

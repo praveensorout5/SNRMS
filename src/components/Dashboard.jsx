@@ -7,7 +7,7 @@ import Toast from './Toast'
 export default function Dashboard({ session, profile, onProfileUpdate, onSignOut }) {
   const [activeSheet, setActiveSheet] = useState('bhati')
   const [view, setView] = useState('current')
-  const [showAdmin, setShowAdmin] = useState(false)
+  const [adminTab, setAdminTab] = useState('users')
   const [toast, setToast] = useState(null)
   const [currentMonth, setCurrentMonth] = useState('')
 
@@ -23,7 +23,9 @@ export default function Dashboard({ session, profile, onProfileUpdate, onSignOut
   }, [])
 
   const isAdmin = profile?.role === 'admin'
-  const canEdit = isAdmin || profile?.can_edit
+  // Only admin can edit cells; users with can_edit can only upload/download PDFs
+  const canEditCells = isAdmin
+  const canEditPdf = isAdmin || profile?.can_edit
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
@@ -85,14 +87,14 @@ export default function Dashboard({ session, profile, onProfileUpdate, onSignOut
           </div>
           {isAdmin && (
             <button
-              onClick={() => setShowAdmin(!showAdmin)}
+              onClick={() => setAdminTab(adminTab === 'none' ? 'users' : 'none')}
               className="btn-sm"
               style={{
-                background: showAdmin ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)',
+                background: adminTab !== 'none' ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.15)',
                 color: 'white',
               }}
             >
-              {showAdmin ? 'Back to Sheet' : 'Admin Panel'}
+              {adminTab !== 'none' ? 'Back to Sheet' : 'Admin Panel'}
             </button>
           )}
           <button
@@ -109,12 +111,14 @@ export default function Dashboard({ session, profile, onProfileUpdate, onSignOut
       </nav>
 
       {/* Content */}
-      {showAdmin && isAdmin ? (
+      {isAdmin && adminTab !== 'none' ? (
         <AdminPanel
           session={session}
           profile={profile}
           onProfileUpdate={onProfileUpdate}
           showToast={showToast}
+          activeTab={adminTab}
+          setActiveTab={setAdminTab}
         />
       ) : (
         <>
@@ -200,7 +204,8 @@ export default function Dashboard({ session, profile, onProfileUpdate, onSignOut
             activeSheet={activeSheet}
             view={view}
             currentMonth={currentMonth}
-            canEdit={canEdit}
+            canEditCells={canEditCells}
+            canEditPdf={canEditPdf}
             isAdmin={isAdmin}
             showToast={showToast}
           />
