@@ -21,7 +21,9 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
   const [uploadingFor, setUploadingFor] = useState(null)
   const [monthLocked, setMonthLocked] = useState(false)
   const [showInsertAt, setShowInsertAt] = useState(null)
+  const [importing, setImporting] = useState(false)
   const fileInputRef = useRef(null)
+  const importFileRef = useRef(null)
 
   const fetchMonthLock = useCallback(async (sheet, month) => {
     if (!sheet || !month) { setMonthLocked(false); return }
@@ -369,6 +371,139 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
     showToast('CSV downloaded', 'success')
   }
 
+  const parseCSV = (text) => {
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== '')
+    if (lines.length < 2) return []
+    const result = []
+    for (let i = 1; i < lines.length; i++) {
+      const cells = []
+      let current = ''
+      let inQuotes = false
+      for (let j = 0; j < lines[i].length; j++) {
+        const ch = lines[i][j]
+        if (ch === '"' && inQuotes && lines[i][j + 1] === '"') {
+          current += '"'
+          j++
+        } else if (ch === '"') {
+          inQuotes = !inQuotes
+        } else if (ch === ',' && !inQuotes) {
+          cells.push(current)
+          current = ''
+        } else {
+          current += ch
+        }
+      }
+      cells.push(current)
+      result.push(cells)
+    }
+    return result
+  }
+
+  const parseDateToISO = (dateStr) => {
+    if (!dateStr) return null
+    const parts = dateStr.split(/[\/\-\.]/)
+    if (parts.length === 3) {
+      let [d, m, y] = parts
+      if (y.length === 2) y = '20' + y
+      if (d.length === 1) d = '0' + d
+      if (m.length === 1) m = '0' + m
+      return `${y}-${m}-${d}`
+    }
+    try {
+      const dt = new Date(dateStr)
+      if (!isNaN(dt)) return dt.toISOString().split('T')[0]
+    } catch {}
+    return null
+  }
+
+  const handleImport = async (file) => {
+    if (!file) return
+    if (monthLocked && !isAdmin) {
+      showToast('This month is locked. Import is not allowed.', 'error')
+      return
+    }
+    const validExts = ['.csv', '.xls', '.xlsx', '.xl']
+    const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
+    if (!validExts.includes(ext)) {
+      showToast('Please upload a CSV or Excel file', 'error')
+      return
+    }
+
+    setImporting(true)
+    try {
+      let rowsData = []
+
+      if (ext === '.csv') {
+        const text = await file.text()
+        rowsData = parseCSV(text)
+      } else {
+        const arrayBuffer = await file.arrayBuffer()
+        const text = new TextDecoder('utf-8').decode(arrayBuffer)
+        const tableMatch = text.match(/<table[\s\S]*?<\/table>/i)
+        if (tableMatch) {
+          const parser = new DOMParser()
+          const doc = parser.parseFromString(tableMatch[0], 'text/html')
+          const trs = doc.querySelectorAll('tr')
+          for (let i = 1; i < trs.length; i++) {
+            const tds = trs[i].querySelectorAll('td,th')
+            const cells = []
+            tds.forEach(td => cells.push(td.textContent.trim()))
+            if (cells.length > 0) rowsData.push(cells)
+          }
+        } else {
+          const lines = text.split(/\r?\n/).filter(l => l.trim() !== '')
+          for (let i = 1; i < lines.length; i++) {
+            rowsData.push(lines[i].split(/[\t,]/))
+          }
+        }
+      }
+
+      if (rowsData.length === 0) {
+        showToast('No data rows found in the file', 'error')
+        setImporting(false)
+        return
+      }
+
+      const startSNo = rows.length > 0 ? Math.max(...rows.map(r => r.s_no || 0)) + 1 : 1
+      const insertData = []
+      rowsData.forEach((cells, idx) => {
+        if (!cells || cells.every(c => c === '' || c === null || c === undefined)) return
+        insertData.push({
+          sheet_type: activeSheet,
+          s_no: startSNo + idx,
+          sewa_from_date: parseDateToISO(cells[1]),
+          sewa_to_date: parseDateToISO(cells[2]),
+          department: cells[3] || '',
+          center: cells[4] || '',
+          no_of_sewadars: cells[5] ? parseInt(cells[5], 10) || 0 : 0,
+          month_year: currentMonth,
+          created_by: session.user.id,
+        })
+      })
+
+      if (insertData.length === 0) {
+        showToast('No valid rows to import', 'error')
+        setImporting(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('nominal_rolls')
+        .insert(insertData)
+        .select()
+
+      if (error) throw error
+
+      setRows([...rows, ...(data || [])])
+      showToast(`${insertData.length} row${insertData.length !== 1 ? 's' : ''} imported successfully`, 'success')
+    } catch (err) {
+      showToast('Import failed: ' + err.message, 'error')
+    } finally {
+      setImporting(false)
+      if (importFileRef.current) importFileRef.current.value = ''
+    }
+  }
+
   const downloadExcel = () => {
     if (rows.length === 0) {
       showToast('No data to download', 'error')
@@ -654,6 +789,27 @@ export default function Spreadsheet({ session, profile, activeSheet, view, curre
               </svg>
               Lock Month
             </button>
+          )}
+          {isAdmin && isCurrentView && (!monthLocked || isAdmin) && (
+            <label
+              className="btn-secondary btn-sm"
+              style={{ cursor: importing ? 'wait' : 'pointer', opacity: importing ? 0.6 : 1 }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              {importing ? 'Importing…' : 'Import CSV/Excel'}
+              <input
+                type="file"
+                accept=".csv,.xls,.xlsx"
+                style={{ display: 'none' }}
+                disabled={importing}
+                ref={importFileRef}
+                onChange={(e) => handleImport(e.target.files[0])}
+              />
+            </label>
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

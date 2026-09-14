@@ -6,6 +6,8 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
   const [loading, setLoading] = useState(true)
   const [auditLogs, setAuditLogs] = useState([])
   const [loadingLogs, setLoadingLogs] = useState(false)
+  const [resetEmail, setResetEmail] = useState('')
+  const [resetLoading, setResetLoading] = useState(false)
 
   const fetchUsers = useCallback(async () => {
     setLoading(true)
@@ -106,22 +108,68 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
   }
 
   const deleteUser = async (userId) => {
-    if (!confirm('Delete this user permanently? They will lose all access and their account will be removed.')) return
+    if (!confirm('Delete this user? They will be soft-deleted and can be restored within 7 days. After 7 days, the account is permanently removed.')) return
     const { error } = await supabase
       .from('profiles')
-      .delete()
+      .update({ approval_status: 'deleted', deleted_at: new Date().toISOString(), deleted_by: session.user.id })
       .eq('id', userId)
 
     if (error) {
       showToast('Failed to delete user', 'error')
     } else {
-      setUsers(users.filter(u => u.id !== userId))
-      showToast('User deleted', 'success')
+      setUsers(users.map(u => u.id === userId ? { ...u, approval_status: 'deleted', deleted_at: new Date().toISOString() } : u))
+      showToast('User deleted. Can be restored within 7 days.', 'success')
+    }
+  }
+
+  const restoreUser = async (userId) => {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ approval_status: 'approved', deleted_at: null, deleted_by: null })
+      .eq('id', userId)
+
+    if (error) {
+      showToast('Failed to restore user', 'error')
+    } else {
+      setUsers(users.map(u => u.id === userId ? { ...u, approval_status: 'approved', deleted_at: null, deleted_by: null } : u))
+      showToast('User restored successfully', 'success')
+    }
+  }
+
+  const handlePasswordReset = async (email) => {
+    if (!email) {
+      showToast('Enter an email address first', 'error')
+      return
+    }
+    setResetLoading(true)
+    try {
+      const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      })
+      if (error) throw error
+      showToast(`Password reset link sent to ${email}`, 'success')
+      setResetEmail('')
+    } catch (err) {
+      showToast('Failed to send reset link: ' + err.message, 'error')
+    } finally {
+      setResetLoading(false)
     }
   }
 
   const pendingCount = users.filter(u => u.approval_status === 'pending').length
   const approvedCount = users.filter(u => u.approval_status === 'approved').length
+  const deletedUsers = users.filter(u => u.approval_status === 'deleted')
+  const activeUsers = users.filter(u => u.approval_status !== 'deleted')
+
+  const getDaysRemaining = (deletedAt) => {
+    if (!deletedAt) return 0
+    const deleted = new Date(deletedAt)
+    const expiry = new Date(deleted.getTime() + 7 * 24 * 60 * 60 * 1000)
+    const now = new Date()
+    const msRemaining = expiry - now
+    if (msRemaining <= 0) return 0
+    return Math.ceil(msRemaining / (24 * 60 * 60 * 1000))
+  }
 
   const formatAuditValue = (vals) => {
     if (!vals) return '—'
@@ -185,6 +233,33 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
           )}
         </button>
         <button
+          onClick={() => setActiveTab('deleted')}
+          style={{
+            padding: '10px 20px',
+            background: 'transparent',
+            color: activeTab === 'deleted' ? 'var(--error-600)' : 'var(--neutral-500)',
+            fontWeight: 600,
+            fontSize: 14,
+            borderBottom: activeTab === 'deleted' ? '2px solid var(--error-600)' : '2px solid transparent',
+            marginBottom: '-2px',
+            borderRadius: '8px 8px 0 0',
+          }}
+        >
+          Deleted Users {deletedUsers.length > 0 && (
+            <span style={{
+              marginLeft: 6,
+              padding: '2px 8px',
+              background: 'var(--error-500)',
+              color: 'white',
+              borderRadius: 10,
+              fontSize: 11,
+              fontWeight: 600,
+            }}>
+              {deletedUsers.length}
+            </span>
+          )}
+        </button>
+        <button
           onClick={() => setActiveTab('history')}
           style={{
             padding: '10px 20px',
@@ -199,6 +274,21 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
         >
           Change History
         </button>
+        <button
+          onClick={() => setActiveTab('password')}
+          style={{
+            padding: '10px 20px',
+            background: 'transparent',
+            color: activeTab === 'password' ? 'var(--primary-600)' : 'var(--neutral-500)',
+            fontWeight: 600,
+            fontSize: 14,
+            borderBottom: activeTab === 'password' ? '2px solid var(--primary-600)' : '2px solid transparent',
+            marginBottom: '-2px',
+            borderRadius: '8px 8px 0 0',
+          }}
+        >
+          Password Reset
+        </button>
       </div>
 
       {activeTab === 'users' ? (
@@ -206,54 +296,33 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
           {/* Stats */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 24 }}>
             <div style={{
-              background: 'white',
-              padding: 16,
-              borderRadius: 8,
-              boxShadow: 'var(--shadow-sm)',
-              border: '1px solid var(--border)',
+              background: 'white', padding: 16, borderRadius: 8, boxShadow: 'var(--shadow-sm)', border: '1px solid var(--border)',
             }}>
               <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Total Users</p>
-              <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--primary-600)' }}>{users.length}</p>
+              <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--primary-600)' }}>{activeUsers.length}</p>
             </div>
             <div style={{
-              background: 'white',
-              padding: 16,
-              borderRadius: 8,
-              boxShadow: 'var(--shadow-sm)',
-              border: '1px solid var(--border)',
+              background: 'white', padding: 16, borderRadius: 8, boxShadow: 'var(--shadow-sm)', border: '1px solid var(--border)',
             }}>
               <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Approved</p>
               <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--success-600)' }}>{approvedCount}</p>
             </div>
             <div style={{
-              background: 'white',
-              padding: 16,
-              borderRadius: 8,
-              boxShadow: 'var(--shadow-sm)',
-              border: '1px solid var(--border)',
+              background: 'white', padding: 16, borderRadius: 8, boxShadow: 'var(--shadow-sm)', border: '1px solid var(--border)',
             }}>
               <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Pending</p>
               <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--warning-600)' }}>{pendingCount}</p>
             </div>
             <div style={{
-              background: 'white',
-              padding: 16,
-              borderRadius: 8,
-              boxShadow: 'var(--shadow-sm)',
-              border: '1px solid var(--border)',
+              background: 'white', padding: 16, borderRadius: 8, boxShadow: 'var(--shadow-sm)', border: '1px solid var(--border)',
             }}>
               <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>Can Edit</p>
-              <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-600)' }}>{users.filter(u => u.can_edit).length}</p>
+              <p style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-600)' }}>{activeUsers.filter(u => u.can_edit).length}</p>
             </div>
           </div>
 
           {/* Users Table */}
-          <div style={{
-            background: 'white',
-            borderRadius: 8,
-            boxShadow: 'var(--shadow)',
-            overflow: 'hidden',
-          }}>
+          <div style={{ background: 'white', borderRadius: 8, boxShadow: 'var(--shadow)', overflow: 'hidden' }}>
             {loading ? (
               <div style={{ padding: 48, textAlign: 'center' }}>
                 <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>Loading users…</p>
@@ -272,13 +341,10 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map(u => (
+                    {activeUsers.map(u => (
                       <tr
                         key={u.id}
-                        style={{
-                          borderBottom: '1px solid var(--border)',
-                          transition: 'background var(--transition)',
-                        }}
+                        style={{ borderBottom: '1px solid var(--border)', transition: 'background var(--transition)' }}
                         onMouseEnter={(e) => e.currentTarget.style.background = 'var(--neutral-50)'}
                         onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
                       >
@@ -296,15 +362,40 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                             <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
                               <button
                                 onClick={() => approveUser(u.id)}
-                                className="btn-sm"
-                                style={{ background: 'var(--success-500)', color: 'white', fontWeight: 600, fontSize: 12 }}
+                                style={{
+                                  background: 'var(--accent-500)',
+                                  color: 'white',
+                                  fontWeight: 700,
+                                  fontSize: 12,
+                                  padding: '6px 14px',
+                                  border: 'none',
+                                  borderRadius: 6,
+                                  cursor: 'pointer',
+                                  boxShadow: '0 1px 3px rgba(34,197,94,0.3)',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                  transition: 'all 150ms ease',
+                                }}
                               >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
                                 Approve
                               </button>
                               <button
                                 onClick={() => rejectUser(u.id)}
-                                className="btn-sm"
-                                style={{ background: 'var(--error-100)', color: 'var(--error-700)', fontWeight: 600, fontSize: 12 }}
+                                style={{
+                                  background: 'var(--error-500)',
+                                  color: 'white',
+                                  fontWeight: 600,
+                                  fontSize: 12,
+                                  padding: '6px 14px',
+                                  border: 'none',
+                                  borderRadius: 6,
+                                  cursor: 'pointer',
+                                  transition: 'all 150ms ease',
+                                }}
                               >
                                 Reject
                               </button>
@@ -334,27 +425,17 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                             onClick={() => toggleEditAccess(u.id, u.can_edit)}
                             disabled={u.role === 'admin' || u.approval_status !== 'approved'}
                             style={{
-                              width: 44,
-                              height: 24,
-                              borderRadius: 12,
+                              width: 44, height: 24, borderRadius: 12,
                               background: u.can_edit ? 'var(--accent-500)' : 'var(--neutral-300)',
-                              position: 'relative',
-                              transition: 'background var(--transition)',
+                              position: 'relative', transition: 'background var(--transition)',
                               cursor: (u.role === 'admin' || u.approval_status !== 'approved') ? 'not-allowed' : 'pointer',
-                              opacity: (u.role === 'admin' || u.approval_status !== 'approved') ? 0.6 : 1,
-                              padding: 0,
+                              opacity: (u.role === 'admin' || u.approval_status !== 'approved') ? 0.6 : 1, padding: 0,
                             }}
                           >
                             <span style={{
-                              position: 'absolute',
-                              top: 3,
-                              left: u.can_edit ? 23 : 3,
-                              width: 18,
-                              height: 18,
-                              background: 'white',
-                              borderRadius: '50%',
-                              transition: 'left var(--transition)',
-                              boxShadow: 'var(--shadow-sm)',
+                              position: 'absolute', top: 3, left: u.can_edit ? 23 : 3,
+                              width: 18, height: 18, background: 'white', borderRadius: '50%',
+                              transition: 'left var(--transition)', boxShadow: 'var(--shadow-sm)',
                             }} />
                           </button>
                         </td>
@@ -385,14 +466,156 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
             Approve users to grant access. Toggle PDF upload to allow users to upload/download PDFs. Admins always have full access.
           </p>
         </>
+      ) : activeTab === 'deleted' ? (
+        <div style={{ background: 'white', borderRadius: 8, boxShadow: 'var(--shadow)', overflow: 'hidden' }}>
+          {deletedUsers.length === 0 ? (
+            <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--neutral-300)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: '0 auto 12px' }}>
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+              <p style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>No deleted users</p>
+              <p style={{ fontSize: 13 }}>Deleted users will appear here for 7 days and can be restored.</p>
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+                <thead>
+                  <tr>
+                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600, fontSize: 12, color: 'var(--neutral-600)', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Name</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600, fontSize: 12, color: 'var(--neutral-600)', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Email</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: 600, fontSize: 12, color: 'var(--neutral-600)', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Deleted On</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: 600, fontSize: 12, color: 'var(--neutral-600)', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Days Left</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'center', fontWeight: 600, fontSize: 12, color: 'var(--neutral-600)', background: 'var(--neutral-50)', borderBottom: '2px solid var(--border)', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deletedUsers.map(u => {
+                    const daysLeft = getDaysRemaining(u.deleted_at)
+                    return (
+                      <tr
+                        key={u.id}
+                        style={{ borderBottom: '1px solid var(--border)', transition: 'background var(--transition)' }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = 'var(--neutral-50)'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                      >
+                        <td style={{ padding: '12px 16px', fontWeight: 500 }}>{u.full_name || '—'}</td>
+                        <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}>{u.email}</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'center', fontSize: 13 }}>
+                          {u.deleted_at ? new Date(u.deleted_at).toLocaleDateString('en-GB') : '—'}
+                        </td>
+                        <td style={{ padding: '12px 16px', textAlign: 'center' }}>
+                          <span style={{
+                            padding: '4px 10px',
+                            background: daysLeft <= 2 ? 'var(--error-100)' : 'var(--warning-100)',
+                            color: daysLeft <= 2 ? 'var(--error-700)' : 'var(--warning-700)',
+                            borderRadius: 12, fontSize: 12, fontWeight: 600,
+                          }}>
+                            {daysLeft} day{daysLeft !== 1 ? 's' : ''} left
+                          </span>
+                        </td>
+                        <td style={{ padding: '12px 16px', textAlign: 'center' }}>
+                          <button
+                            onClick={() => restoreUser(u.id)}
+                            style={{
+                              background: 'var(--accent-500)',
+                              color: 'white',
+                              fontWeight: 600,
+                              fontSize: 12,
+                              padding: '6px 16px',
+                              border: 'none',
+                              borderRadius: 6,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 4,
+                              transition: 'all 150ms ease',
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="1 4 1 10 7 10" />
+                              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                            </svg>
+                            Restore
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p style={{ padding: '16px', fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
+            Users can be restored within 7 days of deletion. After 7 days, the account is permanently removed.
+          </p>
+        </div>
+      ) : activeTab === 'password' ? (
+        <div style={{ maxWidth: 500, margin: '0 auto' }}>
+          <div style={{
+            background: 'white', borderRadius: 8, boxShadow: 'var(--shadow)', padding: 32, textAlign: 'center',
+          }}>
+            <div style={{
+              width: 56, height: 56, margin: '0 auto 16px',
+              background: 'var(--primary-50)', borderRadius: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary-600)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 17v5" />
+                <path d="M9 17v5" />
+                <path d="M3 12h18" />
+                <path d="M5 7h14" />
+                <path d="M5 7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2" />
+                <path d="M5 7v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7" />
+              </svg>
+            </div>
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Reset User Password</h3>
+            <p style={{ fontSize: 14, color: 'var(--text-muted)', marginBottom: 24, lineHeight: 1.5 }}>
+              Enter the email address of the user who forgot their password. A password reset link will be sent to their email automatically.
+            </p>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                type="email"
+                placeholder="user@example.com"
+                value={resetEmail}
+                onChange={(e) => setResetEmail(e.target.value)}
+                style={{ flex: 1 }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !resetLoading) handlePasswordReset(resetEmail) }}
+              />
+              <button
+                onClick={() => handlePasswordReset(resetEmail)}
+                disabled={resetLoading}
+                className="btn-primary"
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                {resetLoading ? 'Sending…' : 'Send Reset Link'}
+              </button>
+            </div>
+            <p style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)' }}>
+              The user will receive an email with a link to set a new password. The link expires after 1 hour.
+            </p>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--neutral-700)', marginBottom: 8 }}>Quick Reset (click a user):</p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {activeUsers.filter(u => u.id !== session.user.id).map(u => (
+                <button
+                  key={u.id}
+                  onClick={() => handlePasswordReset(u.email)}
+                  disabled={resetLoading}
+                  className="btn-secondary btn-sm"
+                  style={{ fontSize: 12 }}
+                >
+                  {u.email}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : (
         /* Change History Tab */
-        <div style={{
-          background: 'white',
-          borderRadius: 8,
-          boxShadow: 'var(--shadow)',
-          overflow: 'hidden',
-        }}>
+        <div style={{ background: 'white', borderRadius: 8, boxShadow: 'var(--shadow)', overflow: 'hidden' }}>
           {loadingLogs ? (
             <div style={{ padding: 48, textAlign: 'center' }}>
               <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>Loading change history…</p>
@@ -415,10 +638,7 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                   {auditLogs.map(log => (
                     <tr
                       key={log.id}
-                      style={{
-                        borderBottom: '1px solid var(--border)',
-                        transition: 'background var(--transition)',
-                      }}
+                      style={{ borderBottom: '1px solid var(--border)', transition: 'background var(--transition)' }}
                       onMouseEnter={(e) => e.currentTarget.style.background = 'var(--neutral-50)'}
                       onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
                     >
@@ -427,10 +647,7 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                       </td>
                       <td style={{ padding: '12px 16px', textAlign: 'center' }}>
                         <span style={{
-                          padding: '3px 10px',
-                          borderRadius: 12,
-                          fontSize: 11,
-                          fontWeight: 600,
+                          padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
                           background: log.action === 'INSERT' ? 'var(--success-100)' : log.action === 'UPDATE' ? 'var(--warning-100)' : 'var(--error-100)',
                           color: log.action === 'INSERT' ? 'var(--success-700)' : log.action === 'UPDATE' ? 'var(--warning-700)' : 'var(--error-700)',
                         }}>
@@ -438,17 +655,9 @@ export default function AdminPanel({ session, profile, onProfileUpdate, showToas
                         </span>
                       </td>
                       <td style={{ padding: '12px 16px', fontSize: 12, color: 'var(--neutral-700)' }}>
-                        {log.action === 'INSERT' && (
-                          <span>Added: {formatAuditValue(log.new_values)}</span>
-                        )}
-                        {log.action === 'UPDATE' && (
-                          <span>
-                            Changed from: {formatAuditValue(log.old_values)} → To: {formatAuditValue(log.new_values)}
-                          </span>
-                        )}
-                        {log.action === 'DELETE' && (
-                          <span>Deleted: {formatAuditValue(log.old_values)}</span>
-                        )}
+                        {log.action === 'INSERT' && <span>Added: {formatAuditValue(log.new_values)}</span>}
+                        {log.action === 'UPDATE' && <span>Changed from: {formatAuditValue(log.old_values)} → To: {formatAuditValue(log.new_values)}</span>}
+                        {log.action === 'DELETE' && <span>Deleted: {formatAuditValue(log.old_values)}</span>}
                       </td>
                     </tr>
                   ))}
